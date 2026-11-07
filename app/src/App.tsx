@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Ctx, type AppCtx } from "./app-context.ts";
 import { IDL, RPC_URL, explainError, getProgram } from "./lib/client.ts";
-import { connectWallet, disconnectWallet, hasWallet, type AnchorWallet } from "./lib/wallet.ts";
+import { connectWallet, disconnectWallet, hasWallet, subscribeWallet, type AnchorWallet } from "./lib/wallet.ts";
 import { txUrl, short } from "./lib/explorer.ts";
 import { Explore } from "./views/Explore.tsx";
 import { OrgPage } from "./views/OrgPage.tsx";
@@ -34,6 +34,8 @@ export default function App() {
   useEffect(() => {
     connectWallet({ silent: true }).then(setWallet).catch(() => undefined);
   }, []);
+
+  useEffect(() => subscribeWallet(setWallet), []);
 
   const go = useCallback((h: string) => {
     window.location.hash = h;
