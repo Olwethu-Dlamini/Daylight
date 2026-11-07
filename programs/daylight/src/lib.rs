@@ -6,6 +6,8 @@ declare_id!("11111111111111111111111111111111");
 
 pub const MAX_NAME_LEN: usize = 32;
 pub const MAX_TITLE_LEN: usize = 64;
+/// A far-future deadline would delay refunds indefinitely.
+pub const MAX_CAMPAIGN_SECS: i64 = 365 * 24 * 60 * 60;
 
 #[program]
 pub mod daylight {
@@ -50,6 +52,10 @@ pub mod daylight {
         require!(target > 0, DaylightError::ZeroTarget);
         let now = Clock::get()?.unix_timestamp;
         require!(deadline > now, DaylightError::DeadlineInPast);
+        require!(
+            deadline <= now.checked_add(MAX_CAMPAIGN_SECS).ok_or(DaylightError::Overflow)?,
+            DaylightError::DeadlineTooFar
+        );
 
         // A zero-data system account must hold the rent-exempt minimum, or the
         // first transfer into it fails. The org pays that once, here.
@@ -151,9 +157,18 @@ pub mod daylight {
             ctx.accounts.campaign.status == CampaignStatus::Open,
             DaylightError::CampaignClosed
         );
+        require!(
+            Clock::get()?.unix_timestamp <= ctx.accounts.campaign.deadline,
+            DaylightError::CampaignExpired
+        );
         require_keys_neq!(
             ctx.accounts.beneficiary.key(),
             ctx.accounts.authority.key(),
+            DaylightError::BeneficiaryIsAuthority
+        );
+        require_keys_neq!(
+            ctx.accounts.beneficiary.key(),
+            ctx.accounts.vault.key(),
             DaylightError::BeneficiaryIsAuthority
         );
 
@@ -165,14 +180,18 @@ pub mod daylight {
             .ok_or(DaylightError::Overflow)?;
         require!(amount <= available, DaylightError::InsufficientFunds);
 
-        // A system account that does not exist yet can only be created by a
-        // transfer of at least the rent-exempt minimum.
-        if ctx.accounts.beneficiary.lamports() == 0 {
-            require!(
-                amount >= Rent::get()?.minimum_balance(0),
-                DaylightError::BelowRentMinimum
-            );
-        }
+        // The beneficiary must end up rent-exempt, or the runtime rejects the
+        // transfer: a new account needs the full minimum, a small one the gap.
+        let resulting = ctx
+            .accounts
+            .beneficiary
+            .lamports()
+            .checked_add(amount)
+            .ok_or(DaylightError::Overflow)?;
+        require!(
+            resulting >= Rent::get()?.minimum_balance(0),
+            DaylightError::BelowRentMinimum
+        );
 
         let campaign_key = ctx.accounts.campaign.key();
         let (_, vault_bump) =
@@ -287,8 +306,10 @@ pub mod daylight {
         Ok(())
     }
 
-    /// Full refund of one donation while nothing has been paid out of the
-    /// campaign, once it has expired or been closed.
+    /// Pro-rata refund of one donation once the campaign has expired or been
+    /// closed. Disbursements are frozen at that point (disburse needs an open,
+    /// unexpired campaign), so `raised - disbursed` is the fixed pool to share.
+    /// Floor division keeps the sum of refunds at or below that pool.
     pub fn refund(ctx: Context<Refund>) -> Result<()> {
         require!(
             !ctx.accounts.donation.refunded,
@@ -297,12 +318,17 @@ pub mod daylight {
         let now = Clock::get()?.unix_timestamp;
         let campaign_ref = &ctx.accounts.campaign;
         let ended = now > campaign_ref.deadline || campaign_ref.status == CampaignStatus::Closed;
-        require!(
-            ended && campaign_ref.disbursed == 0,
-            DaylightError::RefundNotAvailable
-        );
+        require!(ended, DaylightError::RefundNotAvailable);
 
-        let amount = ctx.accounts.donation.amount;
+        let unspent = campaign_ref
+            .raised
+            .checked_sub(campaign_ref.disbursed)
+            .ok_or(DaylightError::Overflow)?;
+        let amount = (ctx.accounts.donation.amount as u128)
+            .checked_mul(unspent as u128)
+            .and_then(|v| v.checked_div(campaign_ref.raised as u128))
+            .and_then(|v| u64::try_from(v).ok())
+            .ok_or(DaylightError::Overflow)?;
         let campaign_key = ctx.accounts.campaign.key();
         let (_, vault_bump) =
             Pubkey::find_program_address(&[b"vault", campaign_key.as_ref()], ctx.program_id);
@@ -503,13 +529,15 @@ pub enum DaylightError {
     ZeroTarget,
     #[msg("Deadline must be in the future")]
     DeadlineInPast,
+    #[msg("Deadline is more than one year away")]
+    DeadlineTooFar,
     #[msg("Campaign is closed")]
     CampaignClosed,
     #[msg("Campaign deadline has passed")]
     CampaignExpired,
     #[msg("Not enough unspent funds in the campaign")]
     InsufficientFunds,
-    #[msg("Beneficiary cannot be the org authority")]
+    #[msg("Beneficiary cannot be the org authority or the campaign vault")]
     BeneficiaryIsAuthority,
     #[msg("A new beneficiary account needs at least the rent-exempt minimum")]
     BelowRentMinimum,
@@ -630,7 +658,11 @@ pub struct Disburse<'info> {
 #[derive(Accounts)]
 pub struct RespondReceipt<'info> {
     pub beneficiary: Signer<'info>,
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [b"org", org.authority.as_ref()],
+        bump
+    )]
     pub org: Account<'info, OrgProfile>,
     #[account(has_one = org @ DaylightError::WrongOrg)]
     pub campaign: Account<'info, Campaign>,
