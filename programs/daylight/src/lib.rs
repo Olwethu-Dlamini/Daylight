@@ -144,6 +144,94 @@ pub mod daylight {
         });
         Ok(())
     }
+
+    pub fn disburse(ctx: Context<Disburse>, amount: u64, proof_hash: [u8; 32]) -> Result<()> {
+        require!(amount > 0, DaylightError::ZeroAmount);
+        require!(
+            ctx.accounts.campaign.status == CampaignStatus::Open,
+            DaylightError::CampaignClosed
+        );
+        require_keys_neq!(
+            ctx.accounts.beneficiary.key(),
+            ctx.accounts.authority.key(),
+            DaylightError::BeneficiaryIsAuthority
+        );
+
+        let campaign_ref = &ctx.accounts.campaign;
+        let available = campaign_ref
+            .raised
+            .checked_sub(campaign_ref.disbursed)
+            .and_then(|v| v.checked_sub(campaign_ref.refunded))
+            .ok_or(DaylightError::Overflow)?;
+        require!(amount <= available, DaylightError::InsufficientFunds);
+
+        // A system account that does not exist yet can only be created by a
+        // transfer of at least the rent-exempt minimum.
+        if ctx.accounts.beneficiary.lamports() == 0 {
+            require!(
+                amount >= Rent::get()?.minimum_balance(0),
+                DaylightError::BelowRentMinimum
+            );
+        }
+
+        let campaign_key = ctx.accounts.campaign.key();
+        let (_, vault_bump) =
+            Pubkey::find_program_address(&[b"vault", campaign_key.as_ref()], ctx.program_id);
+        let vault_seeds: &[&[u8]] = &[b"vault", campaign_key.as_ref(), &[vault_bump]];
+        system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.vault.to_account_info(),
+                    to: ctx.accounts.beneficiary.to_account_info(),
+                },
+                &[vault_seeds],
+            ),
+            amount,
+        )?;
+
+        let now = Clock::get()?.unix_timestamp;
+        let campaign = &mut ctx.accounts.campaign;
+        let index = campaign.disbursement_count;
+        campaign.disbursement_count = campaign
+            .disbursement_count
+            .checked_add(1)
+            .ok_or(DaylightError::Overflow)?;
+        campaign.disbursed = campaign
+            .disbursed
+            .checked_add(amount)
+            .ok_or(DaylightError::Overflow)?;
+
+        let org = &mut ctx.accounts.org;
+        org.disbursed_count = org
+            .disbursed_count
+            .checked_add(1)
+            .ok_or(DaylightError::Overflow)?;
+        org.disbursed_total = org
+            .disbursed_total
+            .checked_add(amount)
+            .ok_or(DaylightError::Overflow)?;
+
+        let disbursement = &mut ctx.accounts.disbursement;
+        disbursement.campaign = campaign.key();
+        disbursement.index = index;
+        disbursement.beneficiary = ctx.accounts.beneficiary.key();
+        disbursement.amount = amount;
+        disbursement.proof_hash = proof_hash;
+        disbursement.status = DisbursementStatus::Sent;
+        disbursement.sent_at = now;
+        disbursement.responded_at = 0;
+
+        emit!(Disbursed {
+            campaign: campaign.key(),
+            org: org.key(),
+            beneficiary: disbursement.beneficiary,
+            index,
+            amount,
+            proof_hash,
+        });
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -401,5 +489,38 @@ pub struct Donate<'info> {
         bump
     )]
     pub donation: Account<'info, Donation>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct Disburse<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    #[account(
+        mut,
+        has_one = authority,
+        seeds = [b"org", authority.key().as_ref()],
+        bump
+    )]
+    pub org: Account<'info, OrgProfile>,
+    #[account(mut, has_one = org @ DaylightError::WrongOrg)]
+    pub campaign: Account<'info, Campaign>,
+    #[account(
+        mut,
+        seeds = [b"vault", campaign.key().as_ref()],
+        bump
+    )]
+    pub vault: SystemAccount<'info>,
+    /// CHECK: any system account; the guardian, school or vendor wallet.
+    #[account(mut)]
+    pub beneficiary: SystemAccount<'info>,
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + Disbursement::INIT_SPACE,
+        seeds = [b"disb", campaign.key().as_ref(), &campaign.disbursement_count.to_le_bytes()],
+        bump
+    )]
+    pub disbursement: Account<'info, Disbursement>,
     pub system_program: Program<'info, System>,
 }
