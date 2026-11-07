@@ -1,0 +1,12 @@
+node_modules/
+dist/
+target/
+.anchor/
+test-ledger/
+*.log
+.env
+.env.*
+!.env.example
+# keypairs must never be committed
+*-keypair.json
+id.json
