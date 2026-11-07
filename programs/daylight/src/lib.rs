@@ -271,6 +271,70 @@ pub mod daylight {
         });
         Ok(())
     }
+
+    pub fn close_campaign(ctx: Context<CloseCampaign>) -> Result<()> {
+        let campaign = &mut ctx.accounts.campaign;
+        require!(
+            campaign.status == CampaignStatus::Open,
+            DaylightError::CampaignClosed
+        );
+        campaign.status = CampaignStatus::Closed;
+
+        emit!(CampaignClosed {
+            campaign: campaign.key(),
+            org: ctx.accounts.org.key(),
+        });
+        Ok(())
+    }
+
+    /// Full refund of one donation while nothing has been paid out of the
+    /// campaign, once it has expired or been closed.
+    pub fn refund(ctx: Context<Refund>) -> Result<()> {
+        require!(
+            !ctx.accounts.donation.refunded,
+            DaylightError::AlreadyRefunded
+        );
+        let now = Clock::get()?.unix_timestamp;
+        let campaign_ref = &ctx.accounts.campaign;
+        let ended = now > campaign_ref.deadline || campaign_ref.status == CampaignStatus::Closed;
+        require!(
+            ended && campaign_ref.disbursed == 0,
+            DaylightError::RefundNotAvailable
+        );
+
+        let amount = ctx.accounts.donation.amount;
+        let campaign_key = ctx.accounts.campaign.key();
+        let (_, vault_bump) =
+            Pubkey::find_program_address(&[b"vault", campaign_key.as_ref()], ctx.program_id);
+        let vault_seeds: &[&[u8]] = &[b"vault", campaign_key.as_ref(), &[vault_bump]];
+        system_program::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.system_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.vault.to_account_info(),
+                    to: ctx.accounts.donor.to_account_info(),
+                },
+                &[vault_seeds],
+            ),
+            amount,
+        )?;
+
+        let campaign = &mut ctx.accounts.campaign;
+        campaign.refunded = campaign
+            .refunded
+            .checked_add(amount)
+            .ok_or(DaylightError::Overflow)?;
+        let donation = &mut ctx.accounts.donation;
+        donation.refunded = true;
+
+        emit!(Refunded {
+            campaign: campaign.key(),
+            donor: donation.donor,
+            index: donation.index,
+            amount,
+        });
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -550,7 +614,6 @@ pub struct Disburse<'info> {
         bump
     )]
     pub vault: SystemAccount<'info>,
-    /// CHECK: any system account; the guardian, school or vendor wallet.
     #[account(mut)]
     pub beneficiary: SystemAccount<'info>,
     #[account(
@@ -579,4 +642,40 @@ pub struct RespondReceipt<'info> {
         bump
     )]
     pub disbursement: Account<'info, Disbursement>,
+}
+
+#[derive(Accounts)]
+pub struct CloseCampaign<'info> {
+    pub authority: Signer<'info>,
+    #[account(
+        has_one = authority,
+        seeds = [b"org", authority.key().as_ref()],
+        bump
+    )]
+    pub org: Account<'info, OrgProfile>,
+    #[account(mut, has_one = org @ DaylightError::WrongOrg)]
+    pub campaign: Account<'info, Campaign>,
+}
+
+#[derive(Accounts)]
+pub struct Refund<'info> {
+    #[account(mut)]
+    pub donor: Signer<'info>,
+    #[account(mut)]
+    pub campaign: Account<'info, Campaign>,
+    #[account(
+        mut,
+        seeds = [b"vault", campaign.key().as_ref()],
+        bump
+    )]
+    pub vault: SystemAccount<'info>,
+    #[account(
+        mut,
+        has_one = campaign,
+        has_one = donor,
+        seeds = [b"donation", campaign.key().as_ref(), &donation.index.to_le_bytes()],
+        bump
+    )]
+    pub donation: Account<'info, Donation>,
+    pub system_program: Program<'info, System>,
 }
