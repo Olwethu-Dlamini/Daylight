@@ -12,7 +12,31 @@ const SOL = web3.LAMPORTS_PER_SOL;
 const lam = (sol: number) => Math.round(sol * SOL);
 const hash32 = (fill: number) => Array(32).fill(fill);
 
+// Playground's `assert` is Node's, not chai's, so provide the few helpers we use.
+const isTrue = (c: unknown, m?: string) => assert.ok(c === true, m);
+const isFalse = (c: unknown, m?: string) => assert.ok(c === false, m);
+const isDefined = (v: unknown) => assert.ok(v !== undefined, "expected a defined value");
+const isAtLeast = (a: number, b: number) => assert.ok(a >= b, `${a} should be >= ${b}`);
+const isAtMost = (a: number, b: number) => assert.ok(a <= b, `${a} should be <= ${b}`);
+
 const program = pg.program;
+
+async function retry<T>(fn: () => Promise<T>, tries = 8, waitMs = 800): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (e: any) {
+      if (i >= tries - 1 || !/does not exist/.test(String(e?.message))) throw e;
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+}
+// A node can lag behind the one that confirmed the transaction; re-read briefly.
+for (const name of ["orgProfile", "campaign", "donation", "disbursement"]) {
+  const acc = (program.account as any)[name];
+  const original = acc.fetch.bind(acc);
+  acc.fetch = (...args: unknown[]) => retry(() => original(...args));
+}
 const pid = program.programId;
 
 const pda = (seeds: Buffer[]) => web3.PublicKey.findProgramAddressSync(seeds, pid)[0];
@@ -43,7 +67,7 @@ async function expectFail(p: Promise<unknown>, needles: string | string[]) {
     await p;
   } catch (e: any) {
     const text = `${e?.error?.errorCode?.code ?? ""} ${e?.message ?? ""} ${(e?.logs ?? []).join(" ")}`;
-    assert.isTrue(
+    isTrue(
       list.some((n) => text.includes(n)),
       `expected failure containing one of ${list.join(" | ")} but got: ${text}`,
     );
@@ -129,7 +153,7 @@ describe("daylight", () => {
     const c = await program.account.campaign.fetch(campaign0);
     assert.equal(c.id, 0);
     assert.equal(c.raised.toNumber(), 0);
-    assert.isDefined(c.status.open);
+    isDefined(c.status.open);
     const rentMin = await pg.connection.getMinimumBalanceForRentExemption(0);
     assert.equal(await pg.connection.getBalance(vault0), rentMin);
   });
@@ -153,7 +177,7 @@ describe("daylight", () => {
     const d = await program.account.donation.fetch(donationPda(campaign0, 0));
     assert.equal(d.donor.toBase58(), donor.publicKey.toBase58());
     assert.equal(d.amount.toNumber(), lam(0.05));
-    assert.isFalse(d.refunded);
+    isFalse(d.refunded);
   });
 
   it("donate rejects zero", async () => {
@@ -192,10 +216,10 @@ describe("daylight", () => {
     for (let i = 0; i < 3; i++) await disburseTo(i, TEN_MILLI);
 
     for (let i = 0; i < 3; i++) {
-      assert.isAtLeast(await pg.connection.getBalance(bene[i].publicKey), lam(0.01));
+      isAtLeast(await pg.connection.getBalance(bene[i].publicKey), lam(0.01));
       const d = await program.account.disbursement.fetch(disbPda(campaign0, i));
       assert.equal(d.beneficiary.toBase58(), bene[i].publicKey.toBase58());
-      assert.isDefined(d.status.sent);
+      isDefined(d.status.sent);
     }
     const o = await program.account.orgProfile.fetch(org);
     assert.equal(o.disbursedCount, 3);
@@ -257,8 +281,8 @@ describe("daylight", () => {
     assert.equal(o.confirmedTotal.toNumber(), lam(0.02));
     assert.equal(o.disbursedCount, 3);
 
-    assert.isDefined((await program.account.disbursement.fetch(disbPda(campaign0, 0))).status.confirmed);
-    assert.isDefined((await program.account.disbursement.fetch(disbPda(campaign0, 2))).status.disputed);
+    isDefined((await program.account.disbursement.fetch(disbPda(campaign0, 0))).status.confirmed);
+    isDefined((await program.account.disbursement.fetch(disbPda(campaign0, 2))).status.disputed);
   });
 
   it("a payout can only be answered once", async () => {
@@ -288,8 +312,8 @@ describe("daylight", () => {
       .signers([donor])
       .rpc();
     const gained = (await pg.connection.getBalance(donor.publicKey)) - before;
-    assert.isAtLeast(gained, lam(0.02) - 20_000);
-    assert.isAtMost(gained, lam(0.02));
+    isAtLeast(gained, lam(0.02) - 20_000);
+    isAtMost(gained, lam(0.02));
     const c = await program.account.campaign.fetch(campaign0);
     assert.equal(c.refunded.toNumber(), lam(0.02));
     const rentMin = await pg.connection.getMinimumBalanceForRentExemption(0);
@@ -360,7 +384,7 @@ describe("daylight", () => {
       await refund();
       const after = await pg.connection.getBalance(donor.publicKey);
       // the donor paid a tx fee, so allow a small margin below the full amount
-      assert.isAtLeast(after - before, lam(0.02) - 20_000);
+      isAtLeast(after - before, lam(0.02) - 20_000);
       const c = await program.account.campaign.fetch(campaign1);
       assert.equal(c.refunded.toNumber(), lam(0.02));
       await expectFail(refund(), "AlreadyRefunded");
