@@ -60,20 +60,30 @@ async function fund(to: web3.PublicKey, sol: number) {
   await web3.sendAndConfirmTransaction(pg.connection, tx, [pg.wallet.keypair]);
 }
 
-// Run a promise that must be rejected; fail the test if it succeeds.
-async function expectFail(p: Promise<unknown>, needles: string | string[]) {
+// Network hiccups that say nothing about the program: retry these, never a success.
+const TRANSIENT = /Blockhash not found|429|Too Many Requests|timed out|block height exceeded|not confirmed|fetch failed/i;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// Run a call that must be rejected; fail the test if it ever succeeds.
+async function expectFail(send: () => Promise<unknown>, needles: string | string[]) {
   const list = Array.isArray(needles) ? needles : [needles];
-  try {
-    await p;
-  } catch (e: any) {
-    const text = `${e?.error?.errorCode?.code ?? ""} ${e?.message ?? ""} ${(e?.logs ?? []).join(" ")}`;
-    isTrue(
-      list.some((n) => text.includes(n)),
-      `expected failure containing one of ${list.join(" | ")} but got: ${text}`,
-    );
-    return;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await send();
+    } catch (e: any) {
+      const text = `${e?.error?.errorCode?.code ?? ""} ${e?.message ?? ""} ${(e?.logs ?? []).join(" ")}`;
+      if (TRANSIENT.test(text) && attempt < 3) {
+        await sleep(1500);
+        continue;
+      }
+      isTrue(
+        list.some((n) => text.includes(n)),
+        `expected failure containing one of ${list.join(" | ")} but got: ${text}`,
+      );
+      return;
+    }
+    assert.fail(`expected failure containing one of ${list.join(" | ")} but the call succeeded`);
   }
-  assert.fail(`expected failure containing one of ${list.join(" | ")} but the call succeeded`);
 }
 
 describe("daylight", () => {
@@ -110,8 +120,7 @@ describe("daylight", () => {
   it("init_org rejects an empty name", async () => {
     const other = web3.Keypair.generate();
     await fund(other.publicKey, 0.01);
-    await expectFail(
-      program.methods
+    await expectFail(() => program.methods
         .initOrg("")
         .accounts({ authority: other.publicKey, org: orgPda(other.publicKey), systemProgram: sysProg })
         .signers([other])
@@ -134,8 +143,8 @@ describe("daylight", () => {
         .signers([orgKp])
         .rpc();
     const now = Math.floor(Date.now() / 1000);
-    await expectFail(mk(now + 2 * 365 * 24 * 3600), "DeadlineTooFar");
-    await expectFail(mk(now - 10), "DeadlineInPast");
+    await expectFail(() => mk(now + 2 * 365 * 24 * 3600), "DeadlineTooFar");
+    await expectFail(() => mk(now - 10), "DeadlineInPast");
   });
 
   it("create_campaign pre-funds the vault with the rent-exempt minimum", async () => {
@@ -181,8 +190,7 @@ describe("daylight", () => {
   });
 
   it("donate rejects zero", async () => {
-    await expectFail(
-      program.methods
+    await expectFail(() => program.methods
         .donate(new BN(0))
         .accounts({
           donor: donor.publicKey,
@@ -231,23 +239,23 @@ describe("daylight", () => {
   });
 
   it("disburse cannot overspend the unspent balance", async () => {
-    await expectFail(disburseTo(3, new BN(lam(0.03)), orgKp, web3.Keypair.generate().publicKey), "InsufficientFunds");
+    await expectFail(() => disburseTo(3, new BN(lam(0.03)), orgKp, web3.Keypair.generate().publicKey), "InsufficientFunds");
   });
 
   it("disburse cannot pay the org authority itself", async () => {
-    await expectFail(disburseTo(3, TEN_MILLI, orgKp, orgKp.publicKey), "BeneficiaryIsAuthority");
+    await expectFail(() => disburseTo(3, TEN_MILLI, orgKp, orgKp.publicKey), "BeneficiaryIsAuthority");
   });
 
   it("only the org's authority can disburse", async () => {
-    await expectFail(disburseTo(3, TEN_MILLI, donor, bene[0].publicKey), ["ConstraintHasOne", "ConstraintSeeds"]);
+    await expectFail(() => disburseTo(3, TEN_MILLI, donor, bene[0].publicKey), ["ConstraintHasOne", "ConstraintSeeds"]);
   });
 
   it("disburse cannot target the campaign's own vault", async () => {
-    await expectFail(disburseTo(3, TEN_MILLI, orgKp, vault0), "BeneficiaryIsAuthority");
+    await expectFail(() => disburseTo(3, TEN_MILLI, orgKp, vault0), "BeneficiaryIsAuthority");
   });
 
   it("disburse below the rent-exempt minimum to a new wallet is refused", async () => {
-    await expectFail(disburseTo(3, new BN(1000), orgKp, web3.Keypair.generate().publicKey), "BelowRentMinimum");
+    await expectFail(() => disburseTo(3, new BN(1000), orgKp, web3.Keypair.generate().publicKey), "BelowRentMinimum");
   });
 
   const respond = (i: number, signer: web3.Keypair, accepted: boolean) =>
@@ -263,11 +271,11 @@ describe("daylight", () => {
       .rpc();
 
   it("the org cannot answer for a beneficiary", async () => {
-    await expectFail(respond(0, orgKp, true), "ConstraintHasOne");
+    await expectFail(() => respond(0, orgKp, true), "ConstraintHasOne");
   });
 
   it("a different beneficiary cannot answer for someone else's payout", async () => {
-    await expectFail(respond(0, bene[1], true), "ConstraintHasOne");
+    await expectFail(() => respond(0, bene[1], true), "ConstraintHasOne");
   });
 
   it("two confirm and one disputes: the score is 2 of 3 with 1 disputed", async () => {
@@ -286,7 +294,7 @@ describe("daylight", () => {
   });
 
   it("a payout can only be answered once", async () => {
-    await expectFail(respond(0, bene[0], false), "AlreadyResponded");
+    await expectFail(() => respond(0, bene[0], false), "AlreadyResponded");
     const o = await program.account.orgProfile.fetch(org);
     assert.equal(o.confirmedCount, 2);
     assert.equal(o.disputedCount, 1);
@@ -321,8 +329,7 @@ describe("daylight", () => {
   });
 
   it("donate and disburse are refused on a closed campaign", async () => {
-    await expectFail(
-      program.methods
+    await expectFail(() => program.methods
         .donate(new BN(lam(0.01)))
         .accounts({
           donor: donor.publicKey,
@@ -335,7 +342,7 @@ describe("daylight", () => {
         .rpc(),
       "CampaignClosed",
     );
-    await expectFail(disburseTo(3, TEN_MILLI, orgKp, web3.Keypair.generate().publicKey), "CampaignClosed");
+    await expectFail(() => disburseTo(3, TEN_MILLI, orgKp, web3.Keypair.generate().publicKey), "CampaignClosed");
   });
 
   describe("refund on an untouched campaign", () => {
@@ -371,7 +378,7 @@ describe("daylight", () => {
         })
         .signers([donor])
         .rpc();
-      await expectFail(refund(), "RefundNotAvailable");
+      await expectFail(() => refund(), "RefundNotAvailable");
     });
 
     it("returns the full donation once the org closes the campaign, and only once", async () => {
@@ -387,7 +394,7 @@ describe("daylight", () => {
       isAtLeast(after - before, lam(0.02) - 20_000);
       const c = await program.account.campaign.fetch(campaign1);
       assert.equal(c.refunded.toNumber(), lam(0.02));
-      await expectFail(refund(), "AlreadyRefunded");
+      await expectFail(() => refund(), "AlreadyRefunded");
     });
   });
 });
