@@ -35,7 +35,14 @@ Everything below happens in the browser at https://beta.solpg.io. Total data use
 ## 6. Hand the IDL to the app
 1. In the left sidebar open **Build & Deploy**, find **Program credentials** and **IDL**, and press
    **Export IDL** (or copy it).
-2. Save it to `app/src/idl/daylight.json` in this repo. It must contain `"address": "<your id>"`.
+2. Save the export somewhere (e.g. Downloads). Look at it: if it has **no `"address"` field** it is an
+   old-format (Anchor 0.29) IDL, which is what Playground exported for this project. Convert it:
+   ```
+   cd app
+   npm run convert-idl -- ~/Downloads/idl.json <PROGRAM_ID>
+   ```
+   This writes `app/src/idl/daylight.json` in the new format. The deployed program is unchanged.
+   If your export already has `"address"`, just save it as `app/src/idl/daylight.json`.
 3. Paste the Program ID into `declare_id!(...)` in `programs/daylight/src/lib.rs` and into
    `Anchor.toml` too, so the repo matches what is deployed.
 

@@ -8,6 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "node --test src/lib/*.test.ts scripts/*.test.mjs",
+    "convert-idl": "node scripts/convert-legacy-idl.mjs",
     "verify": "node scripts/verify.mjs"
   },
   "dependencies": {
