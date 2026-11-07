@@ -10,6 +10,89 @@ pub const MAX_TITLE_LEN: usize = 64;
 #[program]
 pub mod daylight {
     use super::*;
+
+    pub fn init_org(ctx: Context<InitOrg>, name: String) -> Result<()> {
+        require!(
+            !name.is_empty() && name.len() <= MAX_NAME_LEN,
+            DaylightError::NameLength
+        );
+
+        let org = &mut ctx.accounts.org;
+        org.authority = ctx.accounts.authority.key();
+        org.name = name;
+        org.campaign_count = 0;
+        org.disbursed_count = 0;
+        org.confirmed_count = 0;
+        org.disputed_count = 0;
+        org.disbursed_total = 0;
+        org.confirmed_total = 0;
+        org.created_at = Clock::get()?.unix_timestamp;
+
+        emit!(OrgCreated {
+            org: org.key(),
+            authority: org.authority,
+        });
+        Ok(())
+    }
+
+    pub fn create_campaign(
+        ctx: Context<CreateCampaign>,
+        title: String,
+        category: Category,
+        metadata_hash: [u8; 32],
+        target: u64,
+        deadline: i64,
+    ) -> Result<()> {
+        require!(
+            !title.is_empty() && title.len() <= MAX_TITLE_LEN,
+            DaylightError::TitleLength
+        );
+        require!(target > 0, DaylightError::ZeroTarget);
+        let now = Clock::get()?.unix_timestamp;
+        require!(deadline > now, DaylightError::DeadlineInPast);
+
+        // A zero-data system account must hold the rent-exempt minimum, or the
+        // first transfer into it fails. The org pays that once, here.
+        let rent_min = Rent::get()?.minimum_balance(0);
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.authority.to_account_info(),
+                    to: ctx.accounts.vault.to_account_info(),
+                },
+            ),
+            rent_min,
+        )?;
+
+        let org = &mut ctx.accounts.org;
+        let id = org.campaign_count;
+        org.campaign_count = org.campaign_count.checked_add(1).ok_or(DaylightError::Overflow)?;
+
+        let campaign = &mut ctx.accounts.campaign;
+        campaign.org = org.key();
+        campaign.id = id;
+        campaign.title = title;
+        campaign.category = category;
+        campaign.metadata_hash = metadata_hash;
+        campaign.target = target;
+        campaign.raised = 0;
+        campaign.disbursed = 0;
+        campaign.refunded = 0;
+        campaign.donation_count = 0;
+        campaign.disbursement_count = 0;
+        campaign.deadline = deadline;
+        campaign.status = CampaignStatus::Open;
+
+        emit!(CampaignCreated {
+            campaign: campaign.key(),
+            org: org.key(),
+            id,
+            target,
+            deadline,
+        });
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -198,4 +281,51 @@ pub enum DaylightError {
     AlreadyRefunded,
     #[msg("Arithmetic overflow")]
     Overflow,
+}
+
+// ---------------------------------------------------------------------------
+// Account contexts
+// ---------------------------------------------------------------------------
+
+#[derive(Accounts)]
+pub struct InitOrg<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + OrgProfile::INIT_SPACE,
+        seeds = [b"org", authority.key().as_ref()],
+        bump
+    )]
+    pub org: Account<'info, OrgProfile>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct CreateCampaign<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    #[account(
+        mut,
+        has_one = authority,
+        seeds = [b"org", authority.key().as_ref()],
+        bump
+    )]
+    pub org: Account<'info, OrgProfile>,
+    #[account(
+        init,
+        payer = authority,
+        space = 8 + Campaign::INIT_SPACE,
+        seeds = [b"campaign", org.key().as_ref(), &org.campaign_count.to_le_bytes()],
+        bump
+    )]
+    pub campaign: Account<'info, Campaign>,
+    #[account(
+        mut,
+        seeds = [b"vault", campaign.key().as_ref()],
+        bump
+    )]
+    pub vault: SystemAccount<'info>,
+    pub system_program: Program<'info, System>,
 }
