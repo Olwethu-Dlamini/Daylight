@@ -21,13 +21,37 @@ const isAtMost = (a: number, b: number) => assert.ok(a <= b, `${a} should be <= 
 
 const program = pg.program;
 
+// Playground's sandbox has no setTimeout. Wait by polling the network instead,
+// which also lets pending responses through.
+const sleep = async (ms: number) => {
+  const end = Date.now() + ms;
+  do {
+    await pg.connection.getSlot();
+  } while (Date.now() < end);
+};
+
+// Re-read until the value we expect shows up: right after a transaction the
+// node that answers may not have caught up yet.
+async function settle(
+  read: () => Promise<number>,
+  ok: (v: number) => boolean,
+  tries = 12,
+): Promise<number> {
+  let v = await read();
+  for (let i = 0; i < tries && !ok(v); i++) {
+    await sleep(600);
+    v = await read();
+  }
+  return v;
+}
+
 async function retry<T>(fn: () => Promise<T>, tries = 8, waitMs = 800): Promise<T> {
   for (let i = 0; ; i++) {
     try {
       return await fn();
     } catch (e: any) {
       if (i >= tries - 1 || !/does not exist/.test(String(e?.message))) throw e;
-      await new Promise((r) => setTimeout(r, waitMs));
+      await sleep(waitMs);
     }
   }
 }
@@ -62,7 +86,6 @@ async function fund(to: web3.PublicKey, sol: number) {
 
 // Network hiccups that say nothing about the program: retry these, never a success.
 const TRANSIENT = /Blockhash not found|429|Too Many Requests|timed out|block height exceeded|not confirmed|fetch failed/i;
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // Run a call that must be rejected; fail the test if it ever succeeds.
 async function expectFail(send: () => Promise<unknown>, needles: string | string[]) {
@@ -164,7 +187,10 @@ describe("daylight", () => {
     assert.equal(c.raised.toNumber(), 0);
     isDefined(c.status.open);
     const rentMin = await pg.connection.getMinimumBalanceForRentExemption(0);
-    assert.equal(await pg.connection.getBalance(vault0), rentMin);
+    assert.equal(
+      await settle(() => pg.connection.getBalance(vault0), (v) => v === rentMin),
+      rentMin,
+    );
   });
 
   it("donate moves SOL into the vault and writes a receipt", async () => {
@@ -180,7 +206,11 @@ describe("daylight", () => {
       })
       .signers([donor])
       .rpc();
-    assert.equal((await pg.connection.getBalance(vault0)) - before, lam(0.05));
+    const after = await settle(
+      () => pg.connection.getBalance(vault0),
+      (v) => v - before === lam(0.05),
+    );
+    assert.equal(after - before, lam(0.05));
     const c = await program.account.campaign.fetch(campaign0);
     assert.equal(c.raised.toNumber(), lam(0.05));
     const d = await program.account.donation.fetch(donationPda(campaign0, 0));
@@ -224,7 +254,10 @@ describe("daylight", () => {
     for (let i = 0; i < 3; i++) await disburseTo(i, TEN_MILLI);
 
     for (let i = 0; i < 3; i++) {
-      isAtLeast(await pg.connection.getBalance(bene[i].publicKey), lam(0.01));
+      isAtLeast(
+        await settle(() => pg.connection.getBalance(bene[i].publicKey), (v) => v >= lam(0.01)),
+        lam(0.01),
+      );
       const d = await program.account.disbursement.fetch(disbPda(campaign0, i));
       assert.equal(d.beneficiary.toBase58(), bene[i].publicKey.toBase58());
       isDefined(d.status.sent);
@@ -319,13 +352,20 @@ describe("daylight", () => {
       })
       .signers([donor])
       .rpc();
-    const gained = (await pg.connection.getBalance(donor.publicKey)) - before;
+    const gained =
+      (await settle(
+        () => pg.connection.getBalance(donor.publicKey),
+        (v) => v - before >= lam(0.02) - 20_000,
+      )) - before;
     isAtLeast(gained, lam(0.02) - 20_000);
     isAtMost(gained, lam(0.02));
     const c = await program.account.campaign.fetch(campaign0);
     assert.equal(c.refunded.toNumber(), lam(0.02));
     const rentMin = await pg.connection.getMinimumBalanceForRentExemption(0);
-    assert.equal(await pg.connection.getBalance(vault0), rentMin);
+    assert.equal(
+      await settle(() => pg.connection.getBalance(vault0), (v) => v === rentMin),
+      rentMin,
+    );
   });
 
   it("donate and disburse are refused on a closed campaign", async () => {
@@ -389,7 +429,10 @@ describe("daylight", () => {
         .rpc();
       const before = await pg.connection.getBalance(donor.publicKey);
       await refund();
-      const after = await pg.connection.getBalance(donor.publicKey);
+      const after = await settle(
+        () => pg.connection.getBalance(donor.publicKey),
+        (v) => v - before >= lam(0.02) - 20_000,
+      );
       // the donor paid a tx fee, so allow a small margin below the full amount
       isAtLeast(after - before, lam(0.02) - 20_000);
       const c = await program.account.campaign.fetch(campaign1);
