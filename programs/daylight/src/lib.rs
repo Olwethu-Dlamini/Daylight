@@ -1,8 +1,8 @@
 use anchor_lang::prelude::*;
 use anchor_lang::system_program::{self, Transfer};
 
-// Solana Playground replaces this id with your own when you press Build.
-declare_id!("11111111111111111111111111111111");
+// Devnet deployment from Solana Playground. Rebuilding under another keypair changes this id.
+declare_id!("7abs7aHfEvbAHfgzBouGnrRFsHMcXY66jnEV4ABogeKR");
 
 pub const MAX_NAME_LEN: usize = 32;
 pub const MAX_TITLE_LEN: usize = 64;
