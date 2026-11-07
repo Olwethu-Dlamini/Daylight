@@ -93,6 +93,57 @@ pub mod daylight {
         });
         Ok(())
     }
+
+    pub fn donate(ctx: Context<Donate>, amount: u64) -> Result<()> {
+        require!(amount > 0, DaylightError::ZeroAmount);
+        require!(
+            ctx.accounts.campaign.status == CampaignStatus::Open,
+            DaylightError::CampaignClosed
+        );
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            now <= ctx.accounts.campaign.deadline,
+            DaylightError::CampaignExpired
+        );
+
+        system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.donor.to_account_info(),
+                    to: ctx.accounts.vault.to_account_info(),
+                },
+            ),
+            amount,
+        )?;
+
+        let campaign = &mut ctx.accounts.campaign;
+        let index = campaign.donation_count;
+        campaign.donation_count = campaign
+            .donation_count
+            .checked_add(1)
+            .ok_or(DaylightError::Overflow)?;
+        campaign.raised = campaign
+            .raised
+            .checked_add(amount)
+            .ok_or(DaylightError::Overflow)?;
+
+        let donation = &mut ctx.accounts.donation;
+        donation.campaign = campaign.key();
+        donation.donor = ctx.accounts.donor.key();
+        donation.index = index;
+        donation.amount = amount;
+        donation.created_at = now;
+        donation.refunded = false;
+
+        emit!(Donated {
+            campaign: campaign.key(),
+            donor: donation.donor,
+            index,
+            amount,
+        });
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -327,5 +378,28 @@ pub struct CreateCampaign<'info> {
         bump
     )]
     pub vault: SystemAccount<'info>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct Donate<'info> {
+    #[account(mut)]
+    pub donor: Signer<'info>,
+    #[account(mut)]
+    pub campaign: Account<'info, Campaign>,
+    #[account(
+        mut,
+        seeds = [b"vault", campaign.key().as_ref()],
+        bump
+    )]
+    pub vault: SystemAccount<'info>,
+    #[account(
+        init,
+        payer = donor,
+        space = 8 + Donation::INIT_SPACE,
+        seeds = [b"donation", campaign.key().as_ref(), &campaign.donation_count.to_le_bytes()],
+        bump
+    )]
+    pub donation: Account<'info, Donation>,
     pub system_program: Program<'info, System>,
 }
