@@ -1,0 +1,21 @@
+# Only needed if you later install the Anchor CLI locally. The hackathon build
+# path is Solana Playground (see docs/PLAYGROUND.md); the program id below is a
+# placeholder until you deploy.
+[toolchain]
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.devnet]
+daylight = "11111111111111111111111111111111"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "echo 'Tests live in tests/daylight.test.ts and run in Solana Playground'"
