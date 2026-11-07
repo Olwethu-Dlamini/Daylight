@@ -232,6 +232,45 @@ pub mod daylight {
         });
         Ok(())
     }
+
+    /// The beneficiary, and only the beneficiary, answers for a payout. The org
+    /// has no instruction that touches `confirmed_*` or `disputed_*`.
+    pub fn respond_receipt(ctx: Context<RespondReceipt>, accepted: bool) -> Result<()> {
+        require!(
+            ctx.accounts.disbursement.status == DisbursementStatus::Sent,
+            DaylightError::AlreadyResponded
+        );
+
+        let disbursement = &mut ctx.accounts.disbursement;
+        let org = &mut ctx.accounts.org;
+        if accepted {
+            disbursement.status = DisbursementStatus::Confirmed;
+            org.confirmed_count = org
+                .confirmed_count
+                .checked_add(1)
+                .ok_or(DaylightError::Overflow)?;
+            org.confirmed_total = org
+                .confirmed_total
+                .checked_add(disbursement.amount)
+                .ok_or(DaylightError::Overflow)?;
+        } else {
+            disbursement.status = DisbursementStatus::Disputed;
+            org.disputed_count = org
+                .disputed_count
+                .checked_add(1)
+                .ok_or(DaylightError::Overflow)?;
+        }
+        disbursement.responded_at = Clock::get()?.unix_timestamp;
+
+        emit!(ReceiptResponded {
+            campaign: ctx.accounts.campaign.key(),
+            org: org.key(),
+            beneficiary: disbursement.beneficiary,
+            index: disbursement.index,
+            accepted,
+        });
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -523,4 +562,21 @@ pub struct Disburse<'info> {
     )]
     pub disbursement: Account<'info, Disbursement>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct RespondReceipt<'info> {
+    pub beneficiary: Signer<'info>,
+    #[account(mut)]
+    pub org: Account<'info, OrgProfile>,
+    #[account(has_one = org @ DaylightError::WrongOrg)]
+    pub campaign: Account<'info, Campaign>,
+    #[account(
+        mut,
+        has_one = campaign,
+        has_one = beneficiary,
+        seeds = [b"disb", campaign.key().as_ref(), &disbursement.index.to_le_bytes()],
+        bump
+    )]
+    pub disbursement: Account<'info, Disbursement>,
 }
