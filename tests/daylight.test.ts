@@ -96,6 +96,24 @@ describe("daylight", () => {
     );
   });
 
+  it("create_campaign rejects a deadline more than a year away and one in the past", async () => {
+    const mk = (deadlineSecs: number) =>
+      program.methods
+        .createCampaign("Bad deadline", { health: {} }, hash32(1), new BN(lam(0.1)), new BN(deadlineSecs))
+        .accounts({
+          authority: orgKp.publicKey,
+          org,
+          campaign: campaignPda(org, 0),
+          vault: vault0,
+          systemProgram: sysProg,
+        })
+        .signers([orgKp])
+        .rpc();
+    const now = Math.floor(Date.now() / 1000);
+    await expectFail(mk(now + 2 * 365 * 24 * 3600), "DeadlineTooFar");
+    await expectFail(mk(now - 10), "DeadlineInPast");
+  });
+
   it("create_campaign pre-funds the vault with the rent-exempt minimum", async () => {
     await program.methods
       .createCampaign("Term 2 school fees", { education: {} }, hash32(7), new BN(lam(0.1)), deadline())
@@ -200,6 +218,14 @@ describe("daylight", () => {
     await expectFail(disburseTo(3, TEN_MILLI, donor, bene[0].publicKey), ["ConstraintHasOne", "ConstraintSeeds"]);
   });
 
+  it("disburse cannot target the campaign's own vault", async () => {
+    await expectFail(disburseTo(3, TEN_MILLI, orgKp, vault0), "BeneficiaryIsAuthority");
+  });
+
+  it("disburse below the rent-exempt minimum to a new wallet is refused", async () => {
+    await expectFail(disburseTo(3, new BN(1000), orgKp, web3.Keypair.generate().publicKey), "BelowRentMinimum");
+  });
+
   const respond = (i: number, signer: web3.Keypair, accepted: boolean) =>
     program.methods
       .respondReceipt(accepted)
@@ -242,26 +268,32 @@ describe("daylight", () => {
     assert.equal(o.disputedCount, 1);
   });
 
-  it("refund is refused once money has left the campaign", async () => {
+  it("a closed campaign refunds the unspent share pro-rata, so nothing is locked", async () => {
     await program.methods
       .closeCampaign()
       .accounts({ authority: orgKp.publicKey, org, campaign: campaign0 })
       .signers([orgKp])
       .rpc();
-    await expectFail(
-      program.methods
-        .refund()
-        .accounts({
-          donor: donor.publicKey,
-          campaign: campaign0,
-          vault: vault0,
-          donation: donationPda(campaign0, 0),
-          systemProgram: sysProg,
-        })
-        .signers([donor])
-        .rpc(),
-      "RefundNotAvailable",
-    );
+    // raised 0.05, disbursed 0.03 -> the donor's 0.05 maps to the 0.02 left
+    const before = await pg.connection.getBalance(donor.publicKey);
+    await program.methods
+      .refund()
+      .accounts({
+        donor: donor.publicKey,
+        campaign: campaign0,
+        vault: vault0,
+        donation: donationPda(campaign0, 0),
+        systemProgram: sysProg,
+      })
+      .signers([donor])
+      .rpc();
+    const gained = (await pg.connection.getBalance(donor.publicKey)) - before;
+    assert.isAtLeast(gained, lam(0.02) - 20_000);
+    assert.isAtMost(gained, lam(0.02));
+    const c = await program.account.campaign.fetch(campaign0);
+    assert.equal(c.refunded.toNumber(), lam(0.02));
+    const rentMin = await pg.connection.getMinimumBalanceForRentExemption(0);
+    assert.equal(await pg.connection.getBalance(vault0), rentMin);
   });
 
   it("donate and disburse are refused on a closed campaign", async () => {
