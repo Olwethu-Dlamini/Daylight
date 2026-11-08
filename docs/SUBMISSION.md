@@ -51,11 +51,11 @@ Recipient attestations from trusted community bodies (schools, clinics), a minim
 ## Links
 
 - Code: https://github.com/Olwethu-Dlamini/Daylight
-- Demo video: TODO
-- Live app: TODO (runs locally at http://localhost:5173 today)
+- Demo video: https://youtu.be/MLKfBrdadRc
+- Live app: https://olwethu-dlamini.github.io/Daylight/ (devnet, read-only until a Phantom wallet on devnet is connected)
 
 ## Before you submit
 
-- [ ] TODO: record the demo (see `docs/DEMO.md`)
+- [x] Demo recorded and uploaded
 - [ ] TODO: add the dispute run so the demo score is 2 of 3 (67%)
 - [ ] TODO: confirm the track and the submission form's required fields
