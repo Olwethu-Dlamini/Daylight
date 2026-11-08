@@ -55,6 +55,35 @@ npm run build               # typecheck + production build
 npm run verify -- <rpc-url> <org-wallet>
 ```
 
+## Verified on devnet
+
+Program `7abs7aHfEvbAHfgzBouGnrRFsHMcXY66jnEV4ABogeKR` is deployed on devnet and the
+21 tests in `tests/daylight.test.ts` pass against it, including the attack cases.
+
+The web app was also run end to end with real Phantom wallets:
+
+1. One wallet created the org `Daylight Demo Org` (account `8AStXHNNnh83GxSBqhVuTs5qSb4y6Q5diGvTw9HuJ6JL`) and a campaign.
+2. SOL was donated into the campaign vault.
+3. The org paid 0.01 SOL out of the vault to a second wallet.
+4. That second wallet confirmed the payout. Only it could.
+
+Recomputing the score from the raw accounts, with no help from the website:
+
+```
+$ npm run verify -- <rpc-url> 4AjM68Fra73HghzVG7rSMJr5kp8KaiRYWgQxUQXHrYY5
+Daylight Demo Org  (org account 8AStXHNNnh83GxSBqhVuTs5qSb4y6Q5diGvTw9HuJ6JL)
+1 campaign(s), 1 payout(s) found on-chain
+
+  confirmed       0.01 SOL  to GAjY6fYodgKb95JiaBasKfRaoqrEXtqYYCaKjuJw8r9X
+
+confirmed 1  disputed 0  awaiting 0  ->  100% confirmed
+
+OK: the org account matches the raw payouts.
+```
+
+This is one payout between wallets the same person controlled, a check that the
+mechanism works. It says nothing about a real organisation's honesty (see below).
+
 ## Honest limitations
 
 - **It cannot tell a real recipient from the org's own second wallet.** A dishonest org can pay a
